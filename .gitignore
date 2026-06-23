@@ -3,6 +3,13 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# data folders
+data/*
+output/*
+
+# mac stuff
+.DS_Store
+
 # C extensions
 *.so
 
