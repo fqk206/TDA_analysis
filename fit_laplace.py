@@ -39,8 +39,11 @@ from scipy.optimize import nnls
 import fit_crli_simple as crli
 
 
+# Fraction of the peak fit (rising side): 0.50 = rising half, 1.00 = whole peak.
+PEAK_FRACTION = 0.51
+
 # Inversion grid - starts near zero so the small species sits inside the grid.
-RH_MIN_NM = 0.3
+RH_MIN_NM = 0.2
 RH_MAX_NM = 200.0
 N_RH_GRID = 160
 
@@ -54,7 +57,7 @@ OUTPUT_DIR = "output/laplace"
 def invert(prep, side: str) -> dict:
     T_K = 273.15 + crli.TEMPERATURE_C
     t0 = prep.t0_s
-    indices = np.flatnonzero(crli.crli_fit_mask(prep, side))[:: max(1, int(crli.CRLI_FIT_STRIDE))]
+    indices = np.flatnonzero(crli.crli_fit_mask(prep, side, PEAK_FRACTION))[:: max(1, int(crli.CRLI_FIT_STRIDE))]
     if indices.size < 25:
         raise ValueError("Too few fitting points for the inversion.")
 
@@ -105,6 +108,7 @@ def invert(prep, side: str) -> dict:
     stats = {
         "success": True,
         "fit_side": side,
+        "peak_fraction": float(PEAK_FRACTION),
         "t0_s": float(t0),
         "noise_raw": float(prep.noise_raw),
         "n_fit_points": int(t.size),

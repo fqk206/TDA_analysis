@@ -65,6 +65,8 @@ FREE_FRACTION_BOUNDS = (0.01, 0.10)  # (lower, upper); used when mode == "fit_bo
 
 # CRLI
 FIT_SIDE = "rising"                  # "rising", "falling", or "both"
+PEAK_FRACTION = 0.50                 # for the rising side: fraction of the peak fit;
+#                                      0.50 = rising half (up to t0), 1.00 = whole peak.
 RH_GRID_BOUNDS_NM = (1.5, 200.0)
 RH_GRID_AUTONARROW = False           # if True, auto-zoom the grid around the apparent size
 RH_CENTER_BOUNDS_NM = (1.5, 300.0)   # only used when RH_GRID_AUTONARROW is True
@@ -368,11 +370,25 @@ def distribution_stats(Rh_nm: np.ndarray, pdf_logRh: np.ndarray) -> dict:
     }
 
 
-def crli_fit_mask(prep: Prepared, side: str) -> np.ndarray:
+def crli_fit_mask(prep: Prepared, side: str, peak_fraction: float = 0.50) -> np.ndarray:
+    """Select fit points.
+
+    For the rising side, ``peak_fraction`` sets how much of the peak is included:
+    0.50 keeps the rising half (up to t0); larger values extend the upper time
+    cutoff into the falling side, with 1.00 reaching the end of the peak.
+    """
     t, s, t0 = prep.time_s, prep.normalized, prep.t0_s
     mask = prep.good_mask & np.isfinite(s) & (s >= CRLI_SIGNAL_MIN) & (s <= CRLI_SIGNAL_MAX)
     if side == "rising":
-        mask &= t <= t0
+        if not 0.5 <= peak_fraction <= 1.0:
+            raise ValueError("PEAK_FRACTION must be in [0.5, 1.0].")
+        if peak_fraction <= 0.5:
+            mask &= t <= t0
+        else:
+            post = mask & (t >= t0)
+            post_end = float(np.max(t[post])) if np.any(post) else t0
+            cutoff = t0 + (2.0 * peak_fraction - 1.0) * (post_end - t0)
+            mask &= t <= cutoff
     elif side == "falling":
         mask &= t >= t0
     elif side == "both":
@@ -425,7 +441,7 @@ def _free_fraction(q_col, q_free, wx) -> float:
 def fit_crli(prep: Prepared, side: str = FIT_SIDE) -> FitResult:
     T_K = 273.15 + TEMPERATURE_C
     t0 = prep.t0_s
-    all_indices = np.flatnonzero(crli_fit_mask(prep, side))
+    all_indices = np.flatnonzero(crli_fit_mask(prep, side, PEAK_FRACTION))
     indices = all_indices[:: max(1, int(CRLI_FIT_STRIDE))]
     if indices.size < 25:
         raise ValueError("Too few fitting points for the CRLI fit.")
@@ -518,6 +534,7 @@ def fit_crli(prep: Prepared, side: str = FIT_SIDE) -> FitResult:
     stats.update({
         "success": True,
         "fit_side": side,
+        "peak_fraction": float(PEAK_FRACTION),
         "t0_s": float(t0),
         "noise_raw": float(prep.noise_raw),
         "baseline_window_s": float(prep.baseline_window_s),
@@ -735,7 +752,7 @@ def config_dump() -> dict:
         "KERNEL_REFERENCE_RH_NM", "BASELINE_MIN_WINDOW_S", "BASELINE_MAX_WINDOW_S",
         "BASELINE_FRACTION_OF_TRACE", "FREE_RH_NM", "FREE_FRACTION_MODE", "FREE_FRACTION_FIXED",
         "FREE_FRACTION_BOUNDS",
-        "FIT_SIDE", "RH_GRID_BOUNDS_NM", "RH_GRID_AUTONARROW", "RH_CENTER_BOUNDS_NM", "N_RH_GRID", "CRLI_ALPHAS",
+        "FIT_SIDE", "PEAK_FRACTION", "RH_GRID_BOUNDS_NM", "RH_GRID_AUTONARROW", "RH_CENTER_BOUNDS_NM", "N_RH_GRID", "CRLI_ALPHAS",
         "CRLI_RESIDUAL_FACTOR", "RIDGE_RHO", "CRLI_FIT_STRIDE", "CRLI_SIGNAL_MIN", "CRLI_SIGNAL_MAX",
         "SAVE_PLOTS", "SHOW_PLOTS", "TRUNCATION_RH_NM",
     ]
