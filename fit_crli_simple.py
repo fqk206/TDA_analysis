@@ -29,6 +29,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.constants import Boltzmann as kB
+from scipy.ndimage import median_filter
 from scipy.optimize import nnls
 
 
@@ -57,6 +58,21 @@ BASELINE_MIN_WINDOW_S = 15.0
 BASELINE_MAX_WINDOW_S = 90.0
 BASELINE_FRACTION_OF_TRACE = 0.15
 
+# Despiking - narrow artefact spikes are removed before peak/t0 detection.  A
+# single spike can otherwise be the global maximum and place t0 on the artefact
+# (and define the wrong peak height / normalization).  Hampel identifier: flag
+# samples deviating from a rolling median by > DESPIKE_SIGMA local MADs; flagged
+# samples are ignored entirely (dropped from good_mask), never smoothed.
+# DESPIKE_WINDOW is in samples and must exceed the widest spike but stay well
+# below the (broad) Taylor peak - 31 samples is ~2.6 s at the usual 12 Hz.
+# DESPIKE_SIGMA trades off catching small spikes vs sparing genuine points on a
+# very steep, low-noise peak flank (where the rolling median lags the curvature):
+# 8 catches the real artefacts here while flagging at most ~1-2 real flank points
+# on the steepest trace, which is harmless (and shown on the preprocessing plot).
+DESPIKE = True
+DESPIKE_WINDOW = 4
+DESPIKE_SIGMA = 8.0
+
 # Free fluorophore
 FREE_RH_NM = 0.59
 FREE_FRACTION_MODE = "fit_bounded"   # "fit", "fit_bounded", or "fixed"
@@ -75,9 +91,19 @@ CRLI_ALPHAS = np.logspace(-8, 8, 80)
 CRLI_RESIDUAL_FACTOR = 1.10          # smoothest alpha with residual <= factor * best
 RIDGE_RHO = 0.0                      # ridge weight as a fraction of alpha (beta = RIDGE_RHO * alpha);
 #                                      off by default - see note: a uniform ridge broadens the main peak.
-CRLI_FIT_STRIDE = 4
-CRLI_SIGNAL_MIN = 0.03
+CRLI_FIT_STRIDE = 1
+CRLI_SIGNAL_MIN = -10.00
 CRLI_SIGNAL_MAX = 1.02
+
+# t0 handling (shared by the fitters - see t0_seed / refine_t0 below)
+#   "auto"   - lock t0 to the value found in preprocessing (default; t0 rarely
+#              drifts under stable chemical conditions, so this is usually right)
+#   "manual" - lock t0 to T0_MANUAL_S, a hand-set / eyeballed value, bypassing the
+#              peak detector entirely (for when you'd rather read it off the plot)
+#   "fit"    - refine t0 in the fit, bounded to the seed +/- T0_REFINE_BOUND_S
+T0_MODE = "auto"
+T0_MANUAL_S: float | None = None
+T0_REFINE_BOUND_S = 5.0
 
 # Output
 SAVE_PLOTS = True
@@ -104,6 +130,7 @@ class Prepared:
     noise_raw: float
     t0_s: float
     peak_height: float
+    spike_mask: np.ndarray
 
 
 @dataclass
@@ -139,6 +166,28 @@ def robust_std(values: np.ndarray) -> float:
     if not np.isfinite(sigma) or sigma <= 0:
         sigma = np.std(values, ddof=1)
     return float(sigma if sigma > 0 else 1.0)
+
+
+def despike_mask(signal: np.ndarray, window: int, n_sigma: float) -> np.ndarray:
+    """Flag narrow artefact spikes with a Hampel identifier.
+
+    Each sample is compared with a rolling-median estimate of where its
+    neighbours sit (the robust version of "how far can a point jump relative to
+    the points around it"); samples deviating by more than ``n_sigma`` local MADs
+    are flagged.  ``window`` (in samples) must be wider than the broadest spike -
+    so the median tracks the baseline straight across a spike - yet far narrower
+    than the Taylor peak, which is broad and therefore left untouched.  Returns a
+    boolean mask, True at spike samples (to be ignored entirely, not smoothed).
+    """
+    y = np.asarray(signal, dtype=float)
+    if not window or window <= 2 or y.size < 3:
+        return np.zeros(y.shape, dtype=bool)
+    local = median_filter(y, size=int(window), mode="nearest")
+    resid = y - local
+    scale = 1.4826 * np.median(np.abs(resid - np.median(resid)))
+    if not np.isfinite(scale) or scale <= 0:
+        return np.zeros(y.shape, dtype=bool)
+    return np.abs(resid) > n_sigma * scale
 
 
 def trapezoid_weights(x: np.ndarray) -> np.ndarray:
@@ -255,7 +304,22 @@ def linear_baseline(time_s: np.ndarray, signal: np.ndarray, good: np.ndarray, wi
 def prepare(path: str | Path) -> Prepared:
     path = Path(path)
     t, y = read_trace(path)
-    good = np.isfinite(t) & np.isfinite(y)
+    return prepare_from_trace(t, y, path)
+
+
+def prepare_from_trace(time_s: np.ndarray, signal: np.ndarray, path: str | Path) -> Prepared:
+    """Background-subtract and locate the peak for an already-loaded trace.
+
+    Same as :func:`prepare`, but takes the ``(time_s, signal)`` arrays directly
+    so callers that read the trace elsewhere (e.g. the FidaNeo parser) can reuse
+    the identical preprocessing without going back through :func:`read_trace`.
+    """
+    path = Path(path)
+    t = np.asarray(time_s, dtype=float)
+    y = np.asarray(signal, dtype=float)
+    finite = np.isfinite(t) & np.isfinite(y)
+    spike = (despike_mask(y, DESPIKE_WINDOW, DESPIKE_SIGMA) & finite) if DESPIKE else np.zeros(y.shape, dtype=bool)
+    good = finite & ~spike
     if np.sum(good) < 20:
         raise ValueError("Too few finite points in the trace.")
 
@@ -285,6 +349,7 @@ def prepare(path: str | Path) -> Prepared:
         noise_raw=float(noise),
         t0_s=float(t0),
         peak_height=float(peak_height),
+        spike_mask=spike,
     )
 
 
@@ -398,6 +463,38 @@ def crli_fit_mask(prep: Prepared, side: str, peak_fraction: float = 0.50) -> np.
     return mask
 
 
+def t0_seed(prep: Prepared) -> float:
+    """Starting t0: the hand-set value in 'manual' mode, else the detected one."""
+    if T0_MODE == "manual":
+        if T0_MANUAL_S is None:
+            raise ValueError("T0_MODE='manual' requires T0_MANUAL_S to be set.")
+        return float(T0_MANUAL_S)
+    if T0_MODE not in ("auto", "fit"):
+        raise ValueError("T0_MODE must be 'auto', 'manual', or 'fit'.")
+    return float(prep.t0_s)
+
+
+def t0_fit_enabled() -> bool:
+    return T0_MODE == "fit"
+
+
+def refine_t0(objective, seed: float, bound: float | None = None) -> float:
+    """Bounded 1-D refinement of t0 minimizing ``objective(t0)`` (a scalar misfit).
+
+    Returns ``seed`` unchanged unless ``T0_MODE == 'fit'``.  ``objective`` should
+    rebuild the kernel at the trial t0 and return the fit residual; the search is
+    confined to ``seed +/- (bound or T0_REFINE_BOUND_S)`` so it only ever nudges
+    t0, never relocates the peak.
+    """
+    if not t0_fit_enabled():
+        return float(seed)
+    from scipy.optimize import minimize_scalar
+    b = T0_REFINE_BOUND_S if bound is None else bound
+    result = minimize_scalar(objective, bounds=(seed - b, seed + b), method="bounded",
+                             options={"xatol": 1e-3})
+    return float(result.x) if result.success else float(seed)
+
+
 def _solve_fixed(A_col, K_free, L, wx, s, alpha, fraction):
     """NNLS solve with the free fraction pinned exactly to `fraction`.
 
@@ -438,34 +535,16 @@ def _free_fraction(q_col, q_free, wx) -> float:
     return q_free / total if total > 0 else 0.0
 
 
-def fit_crli(prep: Prepared, side: str = FIT_SIDE) -> FitResult:
-    T_K = 273.15 + TEMPERATURE_C
-    t0 = prep.t0_s
-    all_indices = np.flatnonzero(crli_fit_mask(prep, side, PEAK_FRACTION))
-    indices = all_indices[:: max(1, int(CRLI_FIT_STRIDE))]
-    if indices.size < 25:
-        raise ValueError("Too few fitting points for the CRLI fit.")
+def _crli_scan_at_t0(t, s, Rh_grid, wx, L, t0, T_K, free_lo, free_hi) -> dict:
+    """Build the kernel at ``t0`` and run the alpha scan; return the chosen solve.
 
-    t = prep.time_s[indices]
-    y = prep.signal[indices]
-    s = prep.normalized[indices]
-
-    if FREE_FRACTION_MODE == "fixed" and not 0.0 <= FREE_FRACTION_FIXED < 1.0:
-        raise ValueError("FREE_FRACTION_FIXED must be in [0, 1).")
-    free_lo, free_hi = FREE_FRACTION_BOUNDS
-    if FREE_FRACTION_MODE == "fit_bounded" and not 0.0 <= free_lo <= free_hi < 1.0:
-        raise ValueError("FREE_FRACTION_BOUNDS must satisfy 0 <= lower <= upper < 1.")
-
-    rh_min, rh_max = crli_radius_bounds(prep, side, T_K)
-    Rh_grid = np.geomspace(rh_min, rh_max, N_RH_GRID)
-    wx = trapezoid_weights(np.log(Rh_grid))
+    Factored out of fit_crli so t0 can be refined by re-running it over trial t0
+    values (see refine_t0).  Returns the design columns, the full scan and the
+    selected index, so the caller computes outputs without rebuilding.
+    """
     A_col = rh_kernel(t, Rh_grid, t0, T_K) * wx[None, :]
     K_free = rh_kernel(t, FREE_RH_NM, t0, T_K)
-    L = second_difference_matrix(N_RH_GRID)
-
-    solutions = []
-    residual_rms = []
-    roughness = []
+    solutions, residual_rms, roughness = [], [], []
     for alpha in CRLI_ALPHAS:
         if FREE_FRACTION_MODE == "fixed":
             q_col, q_free = _solve_fixed(A_col, K_free, L, wx, s, alpha, FREE_FRACTION_FIXED)
@@ -495,6 +574,42 @@ def fit_crli(prep: Prepared, side: str = FIT_SIDE) -> FitResult:
     best_rms = float(np.min(residual_rms))
     acceptable = np.flatnonzero(residual_rms <= CRLI_RESIDUAL_FACTOR * best_rms)
     chosen = int(acceptable[-1]) if acceptable.size else int(np.argmin(residual_rms))
+    return {"A_col": A_col, "K_free": K_free, "solutions": solutions,
+            "residual_rms": residual_rms, "roughness": roughness,
+            "chosen": chosen, "best_rms": best_rms}
+
+
+def fit_crli(prep: Prepared, side: str = FIT_SIDE) -> FitResult:
+    T_K = 273.15 + TEMPERATURE_C
+    all_indices = np.flatnonzero(crli_fit_mask(prep, side, PEAK_FRACTION))
+    indices = all_indices[:: max(1, int(CRLI_FIT_STRIDE))]
+    if indices.size < 25:
+        raise ValueError("Too few fitting points for the CRLI fit.")
+
+    t = prep.time_s[indices]
+    y = prep.signal[indices]
+    s = prep.normalized[indices]
+
+    if FREE_FRACTION_MODE == "fixed" and not 0.0 <= FREE_FRACTION_FIXED < 1.0:
+        raise ValueError("FREE_FRACTION_FIXED must be in [0, 1).")
+    free_lo, free_hi = FREE_FRACTION_BOUNDS
+    if FREE_FRACTION_MODE == "fit_bounded" and not 0.0 <= free_lo <= free_hi < 1.0:
+        raise ValueError("FREE_FRACTION_BOUNDS must satisfy 0 <= lower <= upper < 1.")
+
+    rh_min, rh_max = crli_radius_bounds(prep, side, T_K)
+    Rh_grid = np.geomspace(rh_min, rh_max, N_RH_GRID)
+    wx = trapezoid_weights(np.log(Rh_grid))
+    L = second_difference_matrix(N_RH_GRID)
+
+    # t0 is either locked (auto/manual) or refined here against the inversion's
+    # own best residual - see T0_MODE.  The fit window above stays pinned to the
+    # preprocessing t0; only the kernel t0 moves.
+    t0_init = t0_seed(prep)
+    t0 = refine_t0(lambda tt: _crli_scan_at_t0(t, s, Rh_grid, wx, L, tt, T_K, free_lo, free_hi)["best_rms"], t0_init)
+    scan = _crli_scan_at_t0(t, s, Rh_grid, wx, L, t0, T_K, free_lo, free_hi)
+    A_col, K_free = scan["A_col"], scan["K_free"]
+    solutions, residual_rms, roughness = scan["solutions"], scan["residual_rms"], scan["roughness"]
+    chosen, best_rms = scan["chosen"], scan["best_rms"]
 
     q_col, q_free, s_col, s_free, s_model = solutions[chosen]
     area_col = float(np.sum(q_col * wx))
@@ -536,6 +651,10 @@ def fit_crli(prep: Prepared, side: str = FIT_SIDE) -> FitResult:
         "fit_side": side,
         "peak_fraction": float(PEAK_FRACTION),
         "t0_s": float(t0),
+        "t0_mode": T0_MODE,
+        "t0_seed_s": float(t0_init),
+        "t0_fitted": t0_fit_enabled(),
+        "t0_shift_s": float(t0 - t0_init),
         "noise_raw": float(prep.noise_raw),
         "baseline_window_s": float(prep.baseline_window_s),
         "n_fit_points": int(t.size),
@@ -616,6 +735,10 @@ def save_preprocessing_plots(prep: Prepared, out_dir: Path, stem: str) -> None:
     plt.figure(figsize=(8, 4))
     plt.plot(t, y, ".", markersize=2, label="raw data")
     plt.plot(t, prep.baseline, "-", label="baseline")
+    spikes = getattr(prep, "spike_mask", None)
+    if spikes is not None and np.any(spikes):
+        plt.plot(t[spikes], y[spikes], "x", color="red", markersize=7, markeredgewidth=1.5,
+                 label=f"{int(np.sum(spikes))} spikes (ignored)")
     plt.axvline(prep.t0_s, linestyle="--", label="t0")
     plt.xlabel("time / s")
     plt.ylabel("signal")
@@ -750,10 +873,12 @@ def config_dump() -> dict:
         "DATA_PATTERN", "OUTPUT_DIR", "TIME_COLUMN", "SIGNAL_COLUMN", "DELIMITER", "SKIPROWS",
         "COMMENTS", "TIME_UNIT", "TEMPERATURE_C", "CAPILLARY_RADIUS_M", "VISCOSITY_PA_S",
         "KERNEL_REFERENCE_RH_NM", "BASELINE_MIN_WINDOW_S", "BASELINE_MAX_WINDOW_S",
-        "BASELINE_FRACTION_OF_TRACE", "FREE_RH_NM", "FREE_FRACTION_MODE", "FREE_FRACTION_FIXED",
+        "BASELINE_FRACTION_OF_TRACE", "DESPIKE", "DESPIKE_WINDOW", "DESPIKE_SIGMA",
+        "FREE_RH_NM", "FREE_FRACTION_MODE", "FREE_FRACTION_FIXED",
         "FREE_FRACTION_BOUNDS",
         "FIT_SIDE", "PEAK_FRACTION", "RH_GRID_BOUNDS_NM", "RH_GRID_AUTONARROW", "RH_CENTER_BOUNDS_NM", "N_RH_GRID", "CRLI_ALPHAS",
         "CRLI_RESIDUAL_FACTOR", "RIDGE_RHO", "CRLI_FIT_STRIDE", "CRLI_SIGNAL_MIN", "CRLI_SIGNAL_MAX",
+        "T0_MODE", "T0_MANUAL_S", "T0_REFINE_BOUND_S",
         "SAVE_PLOTS", "SHOW_PLOTS", "TRUNCATION_RH_NM",
     ]
     out = {}

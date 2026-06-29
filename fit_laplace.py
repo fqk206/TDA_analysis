@@ -54,9 +54,33 @@ REFERENCE_FREE_RH_NM = 0.59          # drawn on the distribution plot for orient
 OUTPUT_DIR = "output/laplace"
 
 
+def _invert_at_t0(t, s, Rh, wx, L, t0, T_K) -> dict:
+    """Build the kernel at ``t0`` and run the alpha scan; return the chosen solve.
+
+    Separated out so t0 can be refined by re-running over trial values
+    (crli.refine_t0); the inversion is linear in q only for a *fixed* t0.
+    """
+    A = crli.rh_kernel(t, Rh, t0, T_K) * wx[None, :]
+    solutions, residual_rms, roughness = [], [], []
+    for alpha in crli.CRLI_ALPHAS:
+        A_aug = np.vstack([A, np.sqrt(alpha) * L])
+        b_aug = np.r_[s, np.zeros(L.shape[0])]
+        q, _ = nnls(A_aug, b_aug, maxiter=20000)
+        s_model = A @ q
+        solutions.append(q)
+        residual_rms.append(float(np.sqrt(np.mean((s_model - s) ** 2))))
+        roughness.append(float(np.linalg.norm(L @ q)))
+    residual_rms = np.asarray(residual_rms)
+    roughness = np.asarray(roughness)
+    best_rms = float(np.min(residual_rms))
+    acceptable = np.flatnonzero(residual_rms <= crli.CRLI_RESIDUAL_FACTOR * best_rms)
+    chosen = int(acceptable[-1]) if acceptable.size else int(np.argmin(residual_rms))
+    return {"A": A, "q": solutions[chosen], "chosen": chosen,
+            "residual_rms": residual_rms, "roughness": roughness, "best_rms": best_rms}
+
+
 def invert(prep, side: str) -> dict:
     T_K = 273.15 + crli.TEMPERATURE_C
-    t0 = prep.t0_s
     indices = np.flatnonzero(crli.crli_fit_mask(prep, side, PEAK_FRACTION))[:: max(1, int(crli.CRLI_FIT_STRIDE))]
     if indices.size < 25:
         raise ValueError("Too few fitting points for the inversion.")
@@ -67,26 +91,17 @@ def invert(prep, side: str) -> dict:
 
     Rh = np.geomspace(RH_MIN_NM, RH_MAX_NM, N_RH_GRID)
     wx = crli.trapezoid_weights(np.log(Rh))
-    A = crli.rh_kernel(t, Rh, t0, T_K) * wx[None, :]
     L = crli.second_difference_matrix(N_RH_GRID)
 
-    solutions, residual_rms, roughness = [], [], []
-    for alpha in crli.CRLI_ALPHAS:
-        A_aug = np.vstack([A, np.sqrt(alpha) * L])
-        b_aug = np.r_[s, np.zeros(L.shape[0])]
-        q, _ = nnls(A_aug, b_aug, maxiter=20000)
-        s_model = A @ q
-        solutions.append(q)
-        residual_rms.append(float(np.sqrt(np.mean((s_model - s) ** 2))))
-        roughness.append(float(np.linalg.norm(L @ q)))
+    # t0 locked (auto/manual) or refined against the inversion residual - T0_MODE.
+    # The fit window stays pinned to the preprocessing t0; only the kernel moves.
+    t0_init = crli.t0_seed(prep)
+    t0 = crli.refine_t0(lambda tt: _invert_at_t0(t, s, Rh, wx, L, tt, T_K)["best_rms"], t0_init)
+    out = _invert_at_t0(t, s, Rh, wx, L, t0, T_K)
+    A, residual_rms, roughness = out["A"], out["residual_rms"], out["roughness"]
+    chosen, best_rms = out["chosen"], out["best_rms"]
 
-    residual_rms = np.asarray(residual_rms)
-    roughness = np.asarray(roughness)
-    best_rms = float(np.min(residual_rms))
-    acceptable = np.flatnonzero(residual_rms <= crli.CRLI_RESIDUAL_FACTOR * best_rms)
-    chosen = int(acceptable[-1]) if acceptable.size else int(np.argmin(residual_rms))
-
-    q = solutions[chosen]
+    q = out["q"]
     area = float(np.sum(q * wx))
     if area <= 0:
         raise ValueError("Inversion recovered zero distribution area.")
@@ -110,6 +125,10 @@ def invert(prep, side: str) -> dict:
         "fit_side": side,
         "peak_fraction": float(PEAK_FRACTION),
         "t0_s": float(t0),
+        "t0_mode": crli.T0_MODE,
+        "t0_seed_s": float(t0_init),
+        "t0_fitted": crli.t0_fit_enabled(),
+        "t0_shift_s": float(t0 - t0_init),
         "noise_raw": float(prep.noise_raw),
         "n_fit_points": int(t.size),
         "rh_min_nm": float(RH_MIN_NM),

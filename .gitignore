@@ -5,7 +5,9 @@ __pycache__/
 
 # data folders
 data/*
+data_series/*
 output/*
+factor_out/*
 
 # mac stuff
 .DS_Store
