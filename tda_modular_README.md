@@ -1,5 +1,11 @@
 # Modular TDA fitting scripts
 
+> **Archived.** This README documents the older multi-model modular pipeline,
+> which now lives under `legacy/`. The current workflow is the single-file
+> `fit_crli_simple.py`, with despiking and time binning factored into the shared
+> `preprocess.py`. The file paths below (`tda_processing.py`, etc.) are relative
+> to `legacy/`. See `docs/simpl.md` for the simplification that superseded this.
+
 This package splits the Taylor Dispersion Analysis workflow into one shared processing module and one fitting script per model.
 
 ## Files

@@ -18,7 +18,7 @@ import math
 import numpy as np
 from scipy.optimize import least_squares
 
-from tda_processing import (
+from legacy.tda_processing import (
     FitResult,
     PreparedTrace,
     Settings,
