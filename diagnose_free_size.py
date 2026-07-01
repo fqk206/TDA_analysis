@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import fit_crli_simple as crli
+from tda.reporting.io import safe_filename
 
 
 # Assumed free-fluorophore sizes to test (nm).  The first is the nominal value.
@@ -62,16 +63,20 @@ def apex_resid_over_noise(result, prep) -> float:
 
 
 def scan_file(path: Path) -> None:
-    prep = crli.prepare(path)
-    stem = crli.safe_filename(path.stem)
-    cutoff = crli.TRUNCATION_RH_NM
+    model = crli.build_model()
+    prep = model.prepare(path)
+    stem = safe_filename(path.stem)
+    cutoff = model.params.truncation_rh_nm
     noise_norm = prep.noise_raw / prep.peak_height
 
     rows = []
     dists = []
     for free_rh in FREE_RH_SCAN_NM:
-        crli.FREE_RH_NM = free_rh
-        result = crli.fit_crli(prep, side=crli.FIT_SIDE)
+        # Unbounded free fraction (mode="fit") so each candidate size can claim
+        # as much signal as the data support, independent of fit_crli_simple's
+        # own bounds - a fresh CRLIModel per trial, no shared state mutated.
+        trial = model.set_params(free_rh_nm=free_rh, free_fraction_mode="fit")
+        result = trial.fit(prep)
         s = result.stats
         dists.append((free_rh, result.Rh_nm, result.pdf_logRh))
         rows.append({
@@ -136,7 +141,6 @@ def _save_distribution_plot(stem: str, dists: list[tuple], cutoff: float) -> Non
 
 
 def main() -> None:
-    crli.FREE_FRACTION_MODE = "fit"   # unbounded free fraction for a clean size scan
     files = sorted(Path(p) for p in glob(crli.DATA_PATTERN, recursive=True) if Path(p).is_file())
     if not files:
         raise FileNotFoundError(f"No files matched {crli.DATA_PATTERN!r}")

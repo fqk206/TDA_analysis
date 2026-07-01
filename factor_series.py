@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import NMF
 
 import fidaneo
-import fit_crli_simple as crli
+from tda.preprocessing.pipeline import PreprocessingPipeline
 
 # =============================================================================
 # Configuration
@@ -78,6 +78,10 @@ MAX_PLOT_MODES = 6          # eigen-Taylorgrams / score curves to draw
 NMF_MAX_ITER = 1000
 NMF_SEED = 0
 
+# Despiking/binning of each trace before alignment (matches fit_crli_simple's
+# default: DESPIKE=True with window=4, n_sigma=18.0; binning off).
+_PREPROCESSING = PreprocessingPipeline()
+
 
 # =============================================================================
 # Step 1 - load, preprocess, and align the series into a matrix
@@ -98,7 +102,7 @@ def build_matrix(folder: str | Path):
     preps, kept_hours, names, t0s, peaks = [], [], [], [], []
     for rec, h in zip(records, hours):
         try:
-            p = crli.prepare_from_trace(rec.time_s, rec.signal, rec.path)
+            p = _PREPROCESSING.run(rec.time_s, rec.signal, rec.path)
         except Exception as exc:  # a single bad trace shouldn't sink the batch
             import warnings
             warnings.warn(f"Skipped {Path(rec.path).name}: {exc}")

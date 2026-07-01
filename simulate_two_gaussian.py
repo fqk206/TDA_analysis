@@ -19,7 +19,7 @@ the same small mass fraction, how differently they show up in the signal.
 
 This is a *forward model*: nothing is fitted, you set the parameters and look at
 the result.  The kernel and physical constants are reused from
-``fit_crli_simple.py`` so the signals are on the same footing as the fitter.
+``tda.physics`` so the signals are on the same footing as the fitters.
 
 Definition of "fraction": each species' distribution is normalised to unit area
 in Rh, then scaled by its fraction; the signal it produces is
@@ -37,13 +37,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-import fit_crli_simple as crli
+from tda.physics import rh_kernel
 
 
 # --- Time axis (a realistic Taylorgram window; absolute values just set widths) ---
 T0_S = 426.0
 TIME_HALF_WINDOW_S = 300.0
 N_TIME = 1500
+TEMPERATURE_C = 25.0                 # matches fit_crli_simple.py's default
 
 # --- Large species (the main colloid peak), fixed ---
 LARGE_RH_NM = 23.0
@@ -73,7 +74,7 @@ def species_signal(t: np.ndarray, Rh: np.ndarray, center: float, sd: float,
                    fraction: float, T_K: float) -> np.ndarray:
     """Signal contributed by one Gaussian species = fraction * kernel-over-distribution."""
     pdf = normal_pdf_Rh(Rh, center, sd)
-    K = crli.rh_kernel(t, Rh, T0_S, T_K)        # (n_time, n_Rh)
+    K = rh_kernel(t, Rh, T0_S, T_K)             # (n_time, n_Rh)
     return fraction * np.trapezoid(K * pdf[None, :], Rh, axis=1)
 
 
@@ -129,7 +130,7 @@ def save_comparison_plot(t: np.ndarray, results: list[tuple], norm: float) -> No
 
 
 def main() -> None:
-    T_K = 273.15 + crli.TEMPERATURE_C
+    T_K = 273.15 + TEMPERATURE_C
     t = np.linspace(T0_S - TIME_HALF_WINDOW_S, T0_S + TIME_HALF_WINDOW_S, N_TIME)
     Rh = np.geomspace(RH_GRID_MIN_NM, RH_GRID_MAX_NM, N_RH_GRID)
 
