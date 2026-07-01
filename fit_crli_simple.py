@@ -29,8 +29,11 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.constants import Boltzmann as kB
-from scipy.ndimage import median_filter
 from scipy.optimize import nnls
+
+# despike_mask / bin_trace live in the shared preprocessing module; re-exported
+# here so downstream scripts that import this file as `crli` keep reaching them.
+from preprocess import despike_mask, bin_trace
 
 
 # =============================================================================
@@ -39,13 +42,14 @@ from scipy.optimize import nnls
 
 # Input
 DATA_PATTERN = "data/*.txt"
-OUTPUT_DIR = "output"
-TIME_COLUMN = 0
-SIGNAL_COLUMN = 1
-DELIMITER: str | None = None         # None splits on any whitespace (tabs/spaces)
-SKIPROWS = 0
-COMMENTS = "#"
-TIME_UNIT = "min"                    # "s", "min", or "ms"
+OUTPUT_DIR = "output/simple/"
+FILE_FORMAT = "old"                  # "old" (plain two-column) or "fidaneo" (FidaNeo .txt export)
+TIME_COLUMN = 0                      # "old" format only
+SIGNAL_COLUMN = 1                    # "old" format only
+DELIMITER: str | None = None         # None splits on any whitespace (tabs/spaces); "old" format only
+SKIPROWS = 0                         # "old" format only
+COMMENTS = "#"                       # "old" format only
+TIME_UNIT = "min"                    # "s", "min", or "ms"; "old" format only (FidaNeo is always minutes)
 TEMPERATURE_C = 25.0
 
 # Physics
@@ -71,7 +75,16 @@ BASELINE_FRACTION_OF_TRACE = 0.15
 # on the steepest trace, which is harmless (and shown on the preprocessing plot).
 DESPIKE = True
 DESPIKE_WINDOW = 4
-DESPIKE_SIGMA = 8.0
+DESPIKE_SIGMA = 18.0
+
+# Binning - optional averaging of the raw trace into fixed-width time bins before
+# the fit (opt-in; off by default fits every sample).  Applied AFTER despiking so
+# flagged spikes are excluded from the averages and never contaminate a bin.  Cuts
+# the point count and lowers per-point noise by ~sqrt(N_bin); keep BIN_WIDTH_S well
+# below the (broad) Taylor peak so the peak shape is preserved.  After binning the
+# trace is clean, so there are no spikes left to mark on the preprocessing plot.
+BIN = False
+BIN_WIDTH_S = 0.5
 
 # Free fluorophore
 FREE_RH_NM = 0.59
@@ -101,7 +114,7 @@ CRLI_SIGNAL_MAX = 1.02
 #   "manual" - lock t0 to T0_MANUAL_S, a hand-set / eyeballed value, bypassing the
 #              peak detector entirely (for when you'd rather read it off the plot)
 #   "fit"    - refine t0 in the fit, bounded to the seed +/- T0_REFINE_BOUND_S
-T0_MODE = "auto"
+T0_MODE = "fit"
 T0_MANUAL_S: float | None = None
 T0_REFINE_BOUND_S = 5.0
 
@@ -152,7 +165,7 @@ class FitResult:
 
 
 # =============================================================================
-# Small numerical helpers (carried over unchanged from tda_processing.py)
+# Small numerical helpers (originally from the now-archived legacy/tda_processing.py)
 # =============================================================================
 
 def robust_std(values: np.ndarray) -> float:
@@ -166,28 +179,6 @@ def robust_std(values: np.ndarray) -> float:
     if not np.isfinite(sigma) or sigma <= 0:
         sigma = np.std(values, ddof=1)
     return float(sigma if sigma > 0 else 1.0)
-
-
-def despike_mask(signal: np.ndarray, window: int, n_sigma: float) -> np.ndarray:
-    """Flag narrow artefact spikes with a Hampel identifier.
-
-    Each sample is compared with a rolling-median estimate of where its
-    neighbours sit (the robust version of "how far can a point jump relative to
-    the points around it"); samples deviating by more than ``n_sigma`` local MADs
-    are flagged.  ``window`` (in samples) must be wider than the broadest spike -
-    so the median tracks the baseline straight across a spike - yet far narrower
-    than the Taylor peak, which is broad and therefore left untouched.  Returns a
-    boolean mask, True at spike samples (to be ignored entirely, not smoothed).
-    """
-    y = np.asarray(signal, dtype=float)
-    if not window or window <= 2 or y.size < 3:
-        return np.zeros(y.shape, dtype=bool)
-    local = median_filter(y, size=int(window), mode="nearest")
-    resid = y - local
-    scale = 1.4826 * np.median(np.abs(resid - np.median(resid)))
-    if not np.isfinite(scale) or scale <= 0:
-        return np.zeros(y.shape, dtype=bool)
-    return np.abs(resid) > n_sigma * scale
 
 
 def trapezoid_weights(x: np.ndarray) -> np.ndarray:
@@ -262,6 +253,19 @@ _TIME_SCALES = {"s": 1.0, "sec": 1.0, "seconds": 1.0, "min": 60.0, "minutes": 60
 
 
 def read_trace(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read a two-column ``(time_s, signal)`` trace in the configured FILE_FORMAT.
+
+    ``"old"`` reads a plain columnar file using the TIME_COLUMN/DELIMITER/... knobs.
+    ``"fidaneo"`` delegates to the :mod:`fidaneo` parser, which pulls the trace out
+    of a tagged FidaNeo export (time column always in minutes, converted here).
+    """
+    fmt = FILE_FORMAT.lower()
+    if fmt == "fidaneo":
+        import fidaneo
+        return fidaneo.read(path).as_trace()
+    if fmt != "old":
+        raise ValueError("FILE_FORMAT must be 'old' or 'fidaneo'.")
+
     data = np.genfromtxt(path, delimiter=DELIMITER, comments=COMMENTS, skip_header=SKIPROWS)
     if data.ndim == 1:
         data = data.reshape(1, -1)
@@ -320,6 +324,17 @@ def prepare_from_trace(time_s: np.ndarray, signal: np.ndarray, path: str | Path)
     finite = np.isfinite(t) & np.isfinite(y)
     spike = (despike_mask(y, DESPIKE_WINDOW, DESPIKE_SIGMA) & finite) if DESPIKE else np.zeros(y.shape, dtype=bool)
     good = finite & ~spike
+
+    if BIN:
+        # Average the despiked trace into fixed-width time bins; flagged spikes are
+        # excluded from the averages.  The binned trace is then clean by
+        # construction - every sample finite, no spikes left to flag - so the
+        # masks below collapse to all-good.
+        t, y, _ = bin_trace(t, y, BIN_WIDTH_S, good_mask=good)
+        finite = np.ones(t.shape, dtype=bool)
+        spike = np.zeros(t.shape, dtype=bool)
+        good = finite
+
     if np.sum(good) < 20:
         raise ValueError("Too few finite points in the trace.")
 
@@ -870,10 +885,11 @@ def save_outputs(result: FitResult, prep: Prepared, out_dir: Path, stem: str) ->
 
 def config_dump() -> dict:
     keys = [
-        "DATA_PATTERN", "OUTPUT_DIR", "TIME_COLUMN", "SIGNAL_COLUMN", "DELIMITER", "SKIPROWS",
+        "DATA_PATTERN", "OUTPUT_DIR", "FILE_FORMAT", "TIME_COLUMN", "SIGNAL_COLUMN", "DELIMITER", "SKIPROWS",
         "COMMENTS", "TIME_UNIT", "TEMPERATURE_C", "CAPILLARY_RADIUS_M", "VISCOSITY_PA_S",
         "KERNEL_REFERENCE_RH_NM", "BASELINE_MIN_WINDOW_S", "BASELINE_MAX_WINDOW_S",
         "BASELINE_FRACTION_OF_TRACE", "DESPIKE", "DESPIKE_WINDOW", "DESPIKE_SIGMA",
+        "BIN", "BIN_WIDTH_S",
         "FREE_RH_NM", "FREE_FRACTION_MODE", "FREE_FRACTION_FIXED",
         "FREE_FRACTION_BOUNDS",
         "FIT_SIDE", "PEAK_FRACTION", "RH_GRID_BOUNDS_NM", "RH_GRID_AUTONARROW", "RH_CENTER_BOUNDS_NM", "N_RH_GRID", "CRLI_ALPHAS",
@@ -943,12 +959,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simplified CRLI fit for two-column TDA traces.")
     parser.add_argument("--data", dest="data_pattern", default=DATA_PATTERN, help="Input glob, e.g. '*.csv'.")
     parser.add_argument("--output", dest="output_dir", default=OUTPUT_DIR, help="Output folder.")
+    parser.add_argument("--format", dest="file_format", choices=["old", "fidaneo"], default=FILE_FORMAT,
+                        help="Input file format: 'old' (plain two-column) or 'fidaneo' (FidaNeo export).")
     parser.add_argument("--side", choices=["rising", "falling", "both"], default=FIT_SIDE, help="Taylorgram side to fit.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    global FILE_FORMAT
+    FILE_FORMAT = args.file_format
     run(args.data_pattern, args.output_dir, args.side)
 
 

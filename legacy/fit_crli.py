@@ -17,7 +17,7 @@ import argparse
 import numpy as np
 from scipy.optimize import nnls
 
-from tda_processing import (
+from legacy.tda_processing import (
     FitResult,
     PreparedTrace,
     Settings,

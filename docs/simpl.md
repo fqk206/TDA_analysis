@@ -6,6 +6,12 @@ subtract a background, and fit a CRLI hydrodynamic-radius distribution.
 
 This document is a plan only. No code has been changed yet.
 
+> **Status (later):** this plan was carried out. The single-file slice now lives
+> in `fit_crli_simple.py` (with shared despiking/binning in `preprocess.py`), and
+> the original files described below — `tda_processing.py`, `fit_crli.py`,
+> `fit_dual_gaussian.py`, `fit_parametric_distribution.py` — have been archived
+> under `legacy/`. The file names in this document refer to that pre-move layout.
+
 ---
 
 ## 1. Goal
