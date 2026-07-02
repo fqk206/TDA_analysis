@@ -305,9 +305,14 @@ def save_laplace_plots(result: FitResult, out_dir: Path, stem: str, reference_fr
               r"regularization $\alpha$", "normalized residual RMS", chosen_x=chosen_alpha, chosen_label="chosen alpha")
 
 
+def parametric_component_role(i: int, k: int) -> str:
+    """Semantic role of parametric component ``i`` of ``k``: the smallest is
+    "dye", the largest is "colloid", anything in between is "compN"."""
+    return "dye" if i == 0 else ("colloid" if i == k - 1 else f"comp{i}")
+
+
 def _parametric_component_label(i: int, k: int, Rh_nm: float) -> str:
-    role = "dye" if i == 0 else ("colloid" if i == k - 1 else f"comp {i}")
-    return f"{role} ({Rh_nm:.2g} nm)"
+    return f"{parametric_component_role(i, k)} ({Rh_nm:.2g} nm)"
 
 
 def save_parametric_plots(result: FitResult, prep: PreparedTrace, out_dir: Path, stem: str,

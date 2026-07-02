@@ -32,8 +32,8 @@ from tda.physics import PhysicsParams
 from tda.preprocessing.pipeline import BaselineParams, PreprocessingPipeline
 from tda.preprocessing.steps import Despike
 from tda.reporting.batch import print_parametric_result, run_batch
-from tda.reporting.io import write_distribution_csv
-from tda.reporting.plots import save_parametric_plots
+from tda.reporting.io import write_decomposition_csv, write_distribution_csv
+from tda.reporting.plots import parametric_component_role, save_parametric_plots
 
 
 # =============================================================================
@@ -87,6 +87,9 @@ def _laplace_overlay(prep, side: str):
 
 def _write_csv(result, out_dir, stem) -> None:
     write_distribution_csv(result, out_dir, stem, "parametric")
+    k = int(result.stats["n_components"])
+    labels = {f"comp{i}": parametric_component_role(i, k) for i in range(k)}
+    write_decomposition_csv(result, out_dir, stem, "parametric", component_labels=labels)
 
 
 def _make_save_plots(model: ParametricModel):

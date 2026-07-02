@@ -94,9 +94,10 @@ preprocess.py          Original standalone despike_mask/bin_trace (unchanged; th
                        canonical copies now live in tda/preprocessing/steps.py).
 fidaneo.py              Original standalone FidaNeo parser (unchanged; canonical
                        copy now lives in tda/io/fidaneo.py).
-tests/parity/           Scripts that diff the library's output against the
-                       pre-refactor scripts on real data (see Testing below).
-legacy/                 Pre-2024 archived originals, out of scope.
+legacy/                 Pre-2024 archived originals, plus the 0.1 -> 0.2
+                       migration's parity-check scripts (`test_phase*.py`,
+                       moved from `tests/parity/` once that migration was
+                       complete - see Testing below); all out of scope.
 docs/                   Design notes (simpl.md, parametric.md, test_findings.md).
 ```
 
@@ -164,8 +165,10 @@ putting it in `steps=(...)` — no model class needs to change.
 
 ## Testing
 
-`tests/parity/` record the behaviour-preservation checks run during the
-0.1 -> 0.2 migration: each script diffs the library against the pre-refactor
+`legacy/test_phase*.py` record the behaviour-preservation checks run during
+the 0.1 -> 0.2 migration (moved out of `tests/parity/` once that migration
+was complete, so `tests/` stays free for a live suite rather than holding a
+historical record): each script diffs the library against the pre-refactor
 scripts on real files in `data/` and `data_series/series_01`, at bitwise
 precision where no optimizer is involved and tight relative tolerance where
 NNLS/`least_squares`/`minimize_scalar` are.

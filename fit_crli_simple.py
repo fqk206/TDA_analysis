@@ -25,7 +25,7 @@ from tda.physics import PhysicsParams
 from tda.preprocessing.pipeline import BaselineParams, PreprocessingPipeline
 from tda.preprocessing.steps import Bin, Despike
 from tda.reporting.batch import print_crli_result, run_batch
-from tda.reporting.io import write_distribution_csv
+from tda.reporting.io import write_decomposition_csv, write_distribution_csv
 from tda.reporting.plots import save_crli_plots
 
 
@@ -61,8 +61,8 @@ BASELINE_FRACTION_OF_TRACE = 0.15
 # samples and must exceed the widest spike but stay well below the (broad)
 # Taylor peak - 31 samples is ~2.6 s at the usual 12 Hz.
 DESPIKE = True
-DESPIKE_WINDOW = 4
-DESPIKE_SIGMA = 18.0
+DESPIKE_WINDOW = 8
+DESPIKE_SIGMA = 8.0
 
 # Binning - optional averaging of the raw trace into fixed-width time bins
 # before the fit (tda.preprocessing.steps.Bin; opt-in, off by default). Runs
@@ -137,6 +137,7 @@ def build_model() -> CRLIModel:
 
 def _write_csv(result, out_dir, stem) -> None:
     write_distribution_csv(result, out_dir, stem, "crli")
+    write_decomposition_csv(result, out_dir, stem, "crli", component_labels={"free": "free_fluorophore"})
 
 
 def run(data_pattern: str, output_dir: str, side: str) -> None:

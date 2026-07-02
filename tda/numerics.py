@@ -8,6 +8,7 @@ from the now-archived ``legacy/tda_processing.py``); math is unchanged.
 from __future__ import annotations
 
 import numpy as np
+from scipy.optimize import least_squares
 
 
 def robust_std(values: np.ndarray) -> float:
@@ -45,14 +46,24 @@ def second_difference_matrix(n: int) -> np.ndarray:
     return matrix
 
 
-def quadratic_peak_time(t: np.ndarray, y: np.ndarray, i_peak: int, half_window: int = 4) -> float:
+def quadratic_peak_time(t: np.ndarray, y: np.ndarray, i_peak: int, half_window: int = 25) -> float:
+    """Sub-sample peak time: a Huber-loss parabola fit through a window around
+    ``i_peak``. Robust (not plain OLS) and wide (not a handful of samples) so
+    that a single artefact spike near the peak - one despiking missed - is
+    just one of many points rather than able to dominate the fit or, worse,
+    be ``i_peak`` itself with the window centred on it."""
     lo = max(0, i_peak - half_window)
     hi = min(len(t), i_peak + half_window + 1)
     if hi - lo < 3:
         return float(t[i_peak])
 
     x = t[lo:hi] - t[i_peak]
-    a, b, _ = np.polyfit(x, y[lo:hi], deg=2)
+    y_win = y[lo:hi]
+    a0, b0, c0 = np.polyfit(x, y_win, deg=2)
+    scale = robust_std(y_win - (a0 * x ** 2 + b0 * x + c0))
+    fit = least_squares(lambda coef: coef[0] * x ** 2 + coef[1] * x + coef[2] - y_win,
+                         x0=[a0, b0, c0], loss="huber", f_scale=scale)
+    a, b, _ = fit.x
     if a >= 0:
         return float(t[i_peak])
     dt = -b / (2 * a)

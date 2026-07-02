@@ -2,9 +2,12 @@
 """Small, config-free output helpers shared by every model's batch runner.
 
 Moved out of ``fit_crli_simple.py`` (``safe_filename``, ``write_rows``,
-``save_current_figure``) plus one new generic helper, ``write_distribution_csv``,
-that works for any model because every :class:`~tda.models.result.FitResult`
-carries the same ``Rh_nm``/``pdf_logRh``/``pdf_Rh_per_nm``/``cdf`` fields.
+``save_current_figure``) plus two generic helpers, ``write_distribution_csv``
+and ``write_decomposition_csv``, that work for any model because every
+:class:`~tda.models.result.FitResult` carries the same
+``Rh_nm``/``pdf_logRh``/``pdf_Rh_per_nm``/``cdf`` and
+``time_fit_s``/``signal_fit_raw``/``signal_model_raw``/``baseline_model_raw``/
+``components`` fields.
 """
 
 from __future__ import annotations
@@ -59,3 +62,31 @@ def write_distribution_csv(result: FitResult, out_dir: Path, stem: str, suffix: 
         for rh, p, pr, c in zip(result.Rh_nm, result.pdf_logRh, result.pdf_Rh_per_nm, result.cdf)
     ]
     write_rows(out_dir / f"{stem}_{suffix}_distribution.csv", rows)
+
+
+def write_decomposition_csv(result: FitResult, out_dir: Path, stem: str, suffix: str,
+                             component_labels: dict[str, str] | None = None) -> None:
+    """Time, raw data, total model, baseline + each named component
+    (``result.components``), and baseline - the signal-space counterpart to
+    ``write_distribution_csv``. Column set follows whatever components the
+    model actually produced (matches ``plot_decomposition``'s ``components``
+    loop), so e.g. a model with no free-fluorophore term simply has no such
+    column. ``component_labels`` renames a component's column (default: the
+    component's key in ``result.components``, e.g. ``"colloid"``)."""
+    labels = component_labels or {}
+    t, y, model, base = result.time_fit_s, result.signal_fit_raw, result.signal_model_raw, result.baseline_model_raw
+    component_columns = {
+        f"baseline_{safe_filename(labels.get(name, name)).lower()}": base + comp
+        for name, comp in result.components.items()
+    }
+    rows = [
+        {
+            "time_s": float(t[i]),
+            "raw_data": float(y[i]),
+            "total_model": float(model[i]),
+            **{col: float(arr[i]) for col, arr in component_columns.items()},
+            "baseline": float(base[i]),
+        }
+        for i in range(len(t))
+    ]
+    write_rows(out_dir / f"{stem}_{suffix}_decomposition.csv", rows)

@@ -25,7 +25,7 @@ from tda.physics import PhysicsParams
 from tda.preprocessing.pipeline import BaselineParams, PreprocessingPipeline
 from tda.preprocessing.steps import Despike
 from tda.reporting.batch import print_laplace_result, run_batch
-from tda.reporting.io import write_distribution_csv
+from tda.reporting.io import write_decomposition_csv, write_distribution_csv
 from tda.reporting.plots import save_laplace_plots
 
 import fit_crli_simple as crli   # shared data pattern / physics / preprocessing CONFIG
@@ -68,6 +68,7 @@ def build_model() -> LaplaceModel:
 
 def _write_csv(result, out_dir, stem) -> None:
     write_distribution_csv(result, out_dir, stem, "laplace")
+    write_decomposition_csv(result, out_dir, stem, "laplace")
 
 
 def _save_plots(result, prep, out_dir, stem) -> None:

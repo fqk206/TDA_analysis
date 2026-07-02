@@ -22,9 +22,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import median_filter
 
 from tda.numerics import quadratic_peak_time, robust_std
 from tda.preprocessing.steps import PreprocessingStep, Despike
+
+# Median-filter window (samples) for locating the coarse peak index before
+# quadratic_peak_time() refines it. argmax() alone is one noisy/spiky sample
+# away from picking the wrong peak entirely on a low-SNR or under-despiked
+# trace (a single sample winning by a hair is enough); a short median filter
+# is immune to any one sample the way argmax isn't, regardless of whether
+# despiking caught it. Independent of Despike's window/n_sigma - this runs
+# whether or not despiking is even in the step list.
+PEAK_LOCATE_MEDIAN_WINDOW = 9
 
 
 @dataclass
@@ -109,7 +119,8 @@ class PreprocessingPipeline:
         noise = robust_std(corrected[edge])
 
         t_good, y_good = t[good], corrected[good]
-        local_peak_i = int(np.argmax(y_good))
+        coarse = median_filter(y_good, size=PEAK_LOCATE_MEDIAN_WINDOW, mode="nearest")
+        local_peak_i = int(np.argmax(coarse))
         t0 = quadratic_peak_time(t_good, y_good, local_peak_i)
         peak_height = float(np.interp(t0, t_good, y_good))
         if not np.isfinite(peak_height) or peak_height <= 0:
